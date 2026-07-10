@@ -51,6 +51,8 @@ class Qwen3Model(nn.Module):
             theta_base=cfg["rope_theta"],
             context_length=cfg["max_position_embeddings"]
         )
+        # nn.Module所提供的方法，将数值注册到缓存中，
+        # 使用方式：self.cos，self.sin
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
         self.cfg = cfg
@@ -66,8 +68,10 @@ class Qwen3Model(nn.Module):
 
         num_tokens = x.shape[1]
         if cache is not None and len(cache) > 0 : # decode阶段
+            # 每一次decode，token在序列中的位置，从self.current_pos取
             pos_start = self.current_pos
-            pos_end = pos_start + num_tokens
+            pos_end = pos_start + num_tokens # decode时，num_tokens= 1
+            # 更新self.current_pos，为下一次decode做准备
             self.current_pos = pos_end
             mask = torch.triu(
                 torch.ones(pos_end, pos_end, device=x.device, dtype=torch.bool), diagonal=1
@@ -178,7 +182,6 @@ class GroupedQueryAttention(nn.Module):
         # Qwen3-0.6B中：d_out = num_attention_heads * head_dim = 16 * 128 = 2048
         # 此时可以将2048维向量拆成16个Q头，每个Q头128维
         self.q_proj = nn.Linear(d_in, self.d_out, bias=False, dtype=dtype)
-        
         # k_proj和v_proj的输出头数更少，d_in输入，num_kv_groups * head_dim输出
         # Qwen3-0.6B中：num_key_value_heads * head_dim = 8 * 128 = 1024
         # 这时可以将1024维向量拆成8个K头/V头，每个头128维
@@ -222,11 +225,13 @@ class GroupedQueryAttention(nn.Module):
         keys_new = apply_rope(keys_new, cos, sin, offset=start_pos)
 
         if cache is not None:
+            # decode阶段，cache不为空，先拿到cache中，历史所有token的k和v cache
             prev_k, prev_v = cache
-            # 把算出来的新的key和value和前面token的k和v拼起来
+            # 把当前decode阶段单个token算出来的新的key和value和前面token的k和v拼起来
             keys = torch.cat([prev_k, keys_new], dim=2)
             values = torch.cat([prev_v, values_new], dim=2)
         else:
+            # prefill阶段，key,value直接取token和k_proj参数矩阵以及token和v_proj参数矩阵，实际算得的k,v向量
             keys, values = keys_new, values_new
         next_cache = (keys, values)
 
@@ -265,16 +270,20 @@ def compute_rope_params(head_dim, theta_base=10_000, context_length=4096, dtype=
 
     # 1. 生成频率下标：0, 2, 4, ..., head_dim-2，总数为head_dim//2
     # torch.arange: 生成一维张量，[)
+    # 2i的所有可能取值
     freq_indices = torch.arange(0, head_dim, 2, dtype=dtype)
 
     # 2. 转成浮点，并除以 head_dim，得到指数
+    # 2i/d
     exponents = freq_indices.float() / head_dim
 
     # 3. 计算 theta_base 的这些指数次幂
+    # 1000000 ^ (2i/d) 
     scales = theta_base ** exponents
 
     # 4. 取倒数，得到 inverse frequencies
     # shape : (head_dim / 2 , )
+    # 所有的θ_i的可能取值
     inv_freq = 1.0 / scales
 
 
@@ -283,10 +292,13 @@ def compute_rope_params(head_dim, theta_base=10_000, context_length=4096, dtype=
     positions = torch.arange(context_length, dtype=dtype)
 
     # 计算每个位置的每组旋转的角度
+    # positions: [0,1,2,3.... context_length]
     # positions.unsqueeze(1): (context_length,1) [[0],[1],[2],.... [context_length -1]]
+    # inv_feq:[100_0000 ^ (0),100_0000 ^ (-2/128),100_0000 ^ (-4/128),,100_0000 ^ (-6/128),100_0000 ^ (-126/128)]
     # inv_freq.unsqueeze(0): (1,head_dim // 2) [[100_0000 ** (-0), 100_0000 ** (-2/head_dim),100_0000 ** (-4/head_dim), ... ]]
     # angles: (context_length, head_dim // 2)
     # angles[0,0]=序列中第0个位置处，第0组分量的旋转角度，对应的就是m * theta_i
+
     angles = positions.unsqueeze(1) * inv_freq.unsqueeze(0)  # Shape: (context_length, head_dim // 2)
 
     # 将angles扩展到head_dim维度，shape: (context_length, head_dim)
@@ -333,9 +345,14 @@ def apply_rope(x, cos, sin, offset=0):
             x1 = [x0, x1, x2, x3]
             x2 = [x4, x5, x6, x7]
         再拼成：
+            rotate_half(x) =[-x2,x1]
             rotate_half(x) = [-x4, -x5, -x6, -x7, x0, x1, x2, x3]
         最终计算：
             x_rotated = x * cos + rotate_half(x) * sin
+            x_rotated = [x1, x2] * cos + [-x2, x1] * sin
+                      = [x1*cos-x2*sin,x2*cos + x1*sin ]
+                      任取一对x0和x4：
+                      算得的结果是：[x0*cos - x4 * sin, x4*cos + x0*sin]，就等于[x0,x4]*旋转矩阵
         展开后就是：
             x0' = x0*cos(a0) - x4*sin(a0)
             x4' = x4*cos(a0) + x0*sin(a0)
@@ -356,6 +373,7 @@ def apply_rope(x, cos, sin, offset=0):
         )
 
     # 将x切分为前一半和后面一半
+    # x.shape : [batch_size, num_heads, seq_len, head_dim]
     x1 = x[..., : head_dim // 2]  # 前面一半：Shape: (batch_size, num_heads, seq_len, head_dim // 2)
     x2 = x[..., head_dim // 2:]  # 后面一半：Shape: (batch_size, num_heads, seq_len, head_dim // 2)
 
@@ -488,6 +506,7 @@ def generate_text(input_ids,model:Qwen3Model,tokenizer:Qwen3Tokenizer,max_len:in
         # 1、prefill阶段
         # output_logits: shape:[batch_size,seq_len,vocab_size]
         # input_ids.shape: batch_size, seq_len 
+        # model(input_ids,cache=kv_cache): 走模型内部的forward方法。
         output_logits = model(input_ids,cache=kv_cache)
         
         # 取最后一个token的logits
@@ -507,9 +526,10 @@ def generate_text(input_ids,model:Qwen3Model,tokenizer:Qwen3Tokenizer,max_len:in
         next_input = next_token_id.unsqueeze(-1)
 
         final_output = torch.cat([final_output,next_input],dim=-1)
-        # 自回归生成的终止条件，其实是有两个： 1、小于最大长度，2、生成EOS token 
+        # 自回归过程中的终止条件：1、生成的token数量达到最大值 2、生成了EOS Token id 
         while generated_token<max_len:
             # 当前KV_Cache就不是空字典了，当前这个dict中的键，就是不同的TransformerBlock的层，值就是这一层所对应的KV Cache
+            # output_logits: shape: batch_size, seq_len, vocab_size
             output_logits =  model(next_input,kv_cache)
             
             logits = output_logits[:,-1,:]
