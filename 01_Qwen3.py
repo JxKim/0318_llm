@@ -3,6 +3,8 @@ import torch.nn as nn
 from pathlib import Path
 import re
 from transformers.models.qwen3 import Qwen3ForCausalLM
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter(log_dir="logs/02_sft_demo")
 
 # Qwen3-0.6B模型结构配置
 QWEN_CONFIG_06_B = {
