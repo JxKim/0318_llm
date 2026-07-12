@@ -31,7 +31,7 @@ attention_mask = tokenized_result["attention_mask"].to("cuda")
 # 4、让模型做自回归生成
 # 调用model.generate方法，内部封装了，自回归生成的过程
 # result: 数据，自回归生成的结果，张量类型，带批次的维度，张量里面所有的token ids：既包含输入的token序列，也包含生成的token序列
-result = model.generate(input_ids,max_new_tokens = 500)
+result = model.generate(input_ids,max_new_tokens = 500,eos_token_id = [151645,151643])
 # 5、处理输出
 # 5.1、取出第0个元素，也就是我们输入的这个样本
 token_ids = result[0]
