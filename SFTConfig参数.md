@@ -110,7 +110,7 @@
   - `cosine`
   - `constant`
 
-### `warmup_step`
+### `warmup_steps`
 
 - **类型**：`float | int`
 - 预热比例/预热步数

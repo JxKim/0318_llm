@@ -569,4 +569,7 @@ def main():
     print(output)
 
 if __name__ == "__main__":
-    main()
+    model = Qwen3Model(QWEN_CONFIG_06_B)
+    for name,module in  model.named_modules():
+        print(name)
+        print(module)

@@ -1,5 +1,16 @@
+from peft import LoraConfig,get_peft_model
 from transformers import AutoModelForCausalLM,AutoTokenizer
+lora_config = LoraConfig(
+    r=16,
+    # target_modules=["q_proj","v_proj","k_proj","o_proj","gate_proj","up_proj","down_proj"]
+    target_modules = "all-linear",
+    lora_alpha= 16,
+    lora_dropout=0.05,
+)
 model = AutoModelForCausalLM.from_pretrained("model/Qwen3-0.6B")
+
+peft_model = get_peft_model(model,lora_config)
+
 tokenizer = AutoTokenizer.from_pretrained("model/Qwen3-0.6B")
 
 
@@ -36,7 +47,7 @@ from trl.trainer.sft_trainer import SFTTrainer
 from trl.trainer.sft_config import SFTConfig
 # 2.1、构造训练时的参数SFTConfig
 import os
-os.environ["TENSORBOARD_LOGGING_DIR"] = "logs/05_trl_demo"
+os.environ["TENSORBOARD_LOGGING_DIR"] = "logs/06_lora_demo"
 sft_config = SFTConfig(
     # 数据规模相关
     per_device_train_batch_size=4,
@@ -49,7 +60,8 @@ sft_config = SFTConfig(
     logging_steps=50,
     report_to="tensorboard",
     # 学习率和优化器相关
-    learning_rate=3e-5,
+    # 注意： LoRA微调的学习率，会比全参微调，高一个数量级左右
+    learning_rate=3e-4,
     lr_scheduler_type="cosine",
     warmup_steps=0.1,
     # optim=
@@ -62,7 +74,7 @@ sft_config = SFTConfig(
     save_strategy="steps",
     save_steps=100,
     save_total_limit=2,
-    output_dir="finetuned/05_trl_demo",
+    output_dir="finetuned/06_lora_demo",
     # 优化相关
     bf16=True,
     gradient_checkpointing=True,
@@ -76,7 +88,7 @@ sft_config = SFTConfig(
 )
 
 trainer = SFTTrainer(
-    model = model,
+    model = peft_model,
     processing_class = tokenizer,
     train_dataset = mapped_dataset_dict["train"],
     eval_dataset = mapped_dataset_dict["test"],
@@ -84,4 +96,4 @@ trainer = SFTTrainer(
 )
 
 trainer.train()
-trainer.save_model("finetuned/05_trl_demo")
+trainer.save_model("finetuned/06_lora_demo")
