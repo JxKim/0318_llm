@@ -82,6 +82,7 @@ sft_config = SFTConfig(
     load_best_model_at_end=True,
     save_strategy="steps",
     save_steps=80,
+    
     save_total_limit=2,
     output_dir="finetuned/10_unsloth_demo",
     # 优化相关
@@ -113,3 +114,5 @@ trainer = train_on_responses_only(
 trainer.train()
 
 trainer.save_model("finetuned/10_unsloth_demo")
+
+model.save_pretrained_merged("./finetuned/Qwen3-8B-SFT-unsloth-merged", tokenizer, save_method="merged_16bit")
