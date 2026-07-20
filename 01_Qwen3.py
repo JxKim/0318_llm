@@ -297,17 +297,24 @@ def compute_rope_params(head_dim, theta_base=10_000, context_length=4096, dtype=
     # 计算每个位置的每组旋转的角度
     # positions: [0,1,2,3.... context_length]
     # positions.unsqueeze(1): (context_length,1) [[0],[1],[2],.... [context_length -1]]
+
     # inv_feq:[100_0000 ^ (0),100_0000 ^ (-2/128),100_0000 ^ (-4/128),,100_0000 ^ (-6/128),100_0000 ^ (-126/128)]
     # inv_freq.unsqueeze(0): (1,head_dim // 2) [[100_0000 ** (-0), 100_0000 ** (-2/head_dim),100_0000 ** (-4/head_dim), ... ]]
+
+    # positions.unsqueeze(1) * inv_freq_unsqueeze(0) 运算时：
+    #   1、前者的列会复制成 head_dim /2 列，后者的行，会复制成 context_length行
+    #   2、做哈达玛积运算
+
     # angles: (context_length, head_dim // 2)
     # angles[0,0]=序列中第0个位置处，第0组分量的旋转角度，对应的就是m * theta_i
 
     angles = positions.unsqueeze(1) * inv_freq.unsqueeze(0)  # Shape: (context_length, head_dim // 2)
 
-    # 将angles扩展到head_dim维度，shape: (context_length, head_dim)
-    angles = torch.cat([angles, angles], dim=1)  # Shape: (context_length, head_dim)
+    # 由于是前半部分和后半部分对应索引位置处做旋转，所以此处将angels复制，从而使得旋转的一组二维分量，共享一个angles值
     # head_dim=8时，一行会变成：[angle_0, angle_1, angle_2, angle_3, angle_0, angle_1, angle_2, angle_3]
-    # 这样刚好匹配apply_rope里的前半/后半配对方式
+    angles = torch.cat([angles, angles], dim=1)  # Shape: (context_length, head_dim)
+    
+    
 
     # 预计算每个角度的余弦值和正弦值
     cos = torch.cos(angles) # 得到序列当中每个位置，每个分量的余弦值
@@ -332,7 +339,7 @@ def apply_rope(x, cos, sin, offset=0):
         x: 需要应用旋转位置编码的张量，shape为[batch_size, num_heads, seq_len, head_dim]
         cos: 预计算好的余弦值张量，shape为[max_position_embeddings, head_dim]
         sin: 预计算好的正弦值张量，shape为[max_position_embeddings, head_dim]
-        offset: 当前这段token在完整序列中的起始位置
+        offset: 当前这段token在完整序列中的起始位置，需要依赖该变量，来从预先计算好的cos和sin张量中取值出来
     Returns:
         应用RoPE后的张量，shape与x相同
 
@@ -341,30 +348,32 @@ def apply_rope(x, cos, sin, offset=0):
             x = [x0, x1, x2, x3, x4, x5, x6, x7]
         当前position对应的角度为：
             angles = [a0, a1, a2, a3, a0, a1, a2, a3]
-        那么cos和sin分别是：
-            cos = [cos(a0), cos(a1), cos(a2), cos(a3), cos(a0), cos(a1), cos(a2), cos(a3)]
-            sin = [sin(a0), sin(a1), sin(a2), sin(a3), sin(a0), sin(a1), sin(a2), sin(a3)]
+        从cos和sin中取出来的值为
+            pos_cos = [cos(a0), cos(a1), cos(a2), cos(a3), cos(a0), cos(a1), cos(a2), cos(a3)]
+            pos_sin = [sin(a0), sin(a1), sin(a2), sin(a3), sin(a0), sin(a1), sin(a2), sin(a3)]
         rotate_half(x)会先把x拆成前后两半：
-            x1 = [x0, x1, x2, x3]
-            x2 = [x4, x5, x6, x7]
+            first_half = [x0, x1, x2, x3]
+            second_half = [x4, x5, x6, x7]
         再拼成：
-            rotate_half(x) =[-x2,x1]
+            rotate_half(x) =[-second_half,first_half]
+            也即：
             rotate_half(x) = [-x4, -x5, -x6, -x7, x0, x1, x2, x3]
         最终计算：
-            x_rotated = x * cos + rotate_half(x) * sin
-            x_rotated = [x1, x2] * cos + [-x2, x1] * sin
-                      = [x1*cos-x2*sin,x2*cos + x1*sin ]
-                      任取一对x0和x4：
-                      算得的结果是：[x0*cos - x4 * sin, x4*cos + x0*sin]，就等于[x0,x4]*旋转矩阵
+            x_rotated = x * pos_cos + rotate_half(x) * pos_sin
+        也即：
+            x_rotated = [first_half, second_half] * pos_cos + [-second_half, first_half] * pos_sin
+        由于first_half和second_half，也都是向量，所以上面的式子，可以拆解成对应位置处的处理。
+                      
+        现从first_half和second_half当中，取第0个索引位置处的值，x0和x4，计算最终结果：
+            [x0*cos(a0) - x4 * sin(a0), x4*cos(a0) + x0*sin(a0)]，
         展开后就是：
             x0' = x0*cos(a0) - x4*sin(a0)
             x4' = x4*cos(a0) + x0*sin(a0)
 
-            
-            x1' = x1*cos(a1) - x5*sin(a1)
-            x5' = x5*cos(a1) + x1*sin(a1)
+        等价于：
+            [x0, x4] * 旋转矩阵
         
-        其他分量同理。它本质上是在二维平面(x0, x4)、(x1, x5)...里按位置角度做旋转。
+        其他分量同理。
     """
     # x: (batch_size, num_heads, seq_len, head_dim)
     batch_size, num_heads, seq_len, head_dim = x.shape
